@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境（第 19 章：提交配料表 requirements.txt，不提交环境本身）
+.venv/
+venv/
+
+# 环境变量与密钥（第 24 章）
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 操作系统
+.DS_Store
+Thumbs.db
