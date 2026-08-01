@@ -110,6 +110,26 @@ def check_file(path: pathlib.Path):
             marker = re.search(r"#\s*=>\s*(.+)$", line)
             code = line.split("#")[0].rstrip() if marker else line
             if not code.strip():
+                # `# =>` 独占一行（多行结构后面统一标注输出）时，这里没有代码可执行。
+                # 逐行模式核对不了它，但整块输出里应该能找到 → 交给下面的宽松核对。
+                # 不这样处理的话这类标注会被静默丢掉，写错了也发现不了
+                # （第 15 章就靠 tools/check_blocks.py 才抓出一个错别字）。
+                if marker and whole_output is not None:
+                    expected_only = marker.group(1).strip()
+                    # 标注常在输出值后面跟一段中文说明，所以取第一段做比对
+                    # （和下面严格模式的 head 用同一套规则）
+                    head_only = expected_only.split()[0] if expected_only.split() else ""
+                    if head_only and not any(
+                        w in expected_only for w in DECLARED_UNSTABLE
+                    ):
+                        total += 1
+                        if head_only in whole_output or expected_only in whole_output:
+                            ok += 1
+                        else:
+                            problems.append(
+                                (block_no, "（标注独占一行）", expected_only,
+                                 f"整块输出里找不到（整块输出为 {whole_output.strip()[:80]!r}）")
+                            )
                 continue
 
             buf = io.StringIO()
