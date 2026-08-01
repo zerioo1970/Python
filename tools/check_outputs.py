@@ -34,6 +34,12 @@ VOLATILE = (
     " is ", " is not ",
 )
 
+# 标注文字里出现这些词，说明作者已经声明"这个输出每次运行都可能不同"，不参与比对。
+#   典型场景：打印含字符串的集合。CPython 对字符串哈希做随机化（每个进程一个种子），
+#   所以 print(set("hello")) 的元素顺序每次运行都不一样——这不是错，
+#   正是第 12 章要讲的"集合无序"，文中必须原样展示并注明。
+DECLARED_UNSTABLE = ("顺序不定", "顺序每次不同", "每次运行都不同", "你运行时")
+
 
 def check_output_blocks(text: str):
     """核对「```python 代码块紧跟 ```text 输出块」这种成对结构。
@@ -47,6 +53,9 @@ def check_output_blocks(text: str):
 
     for code, expected in pairs:
         if any(v in code for v in VOLATILE) or "❌" in code or "# =>" in code:
+            skipped += 1
+            continue
+        if any(w in expected for w in DECLARED_UNSTABLE):
             skipped += 1
             continue
         buf = io.StringIO()
@@ -66,6 +75,22 @@ def check_output_blocks(text: str):
     return checked, skipped, problems
 
 
+def run_whole_block(block: str) -> str | None:
+    """整块执行代码块，返回全部输出；执行失败返回 None。
+
+    为什么需要它：逐行执行无法处理多行结构（for / while / if / with 的循环体和分支体
+    在语法上是独立的行，逐行 exec 时循环体根本不会被执行）。整块执行的输出用作兜底，
+    让这类示例也能被核对到。
+    """
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(block, {})
+    except Exception:
+        return None
+    return buf.getvalue()
+
+
 def check_file(path: pathlib.Path):
     text = path.read_text(encoding="utf-8")
     blocks = re.findall(r"```python\n(.*?)```", text, re.S)
@@ -77,6 +102,9 @@ def check_file(path: pathlib.Path):
         if not re.search(r"#\s*=>", block):
             continue
 
+        # 整块执行的输出，用于逐行模式无法核对时兜底
+        whole_output = run_whole_block(block)
+
         env: dict = {}
         for line in block.split("\n"):
             marker = re.search(r"#\s*=>\s*(.+)$", line)
@@ -85,14 +113,12 @@ def check_file(path: pathlib.Path):
                 continue
 
             buf = io.StringIO()
+            failed = False
             try:
                 with contextlib.redirect_stdout(buf):
                     exec(code, env)
             except Exception:
-                # 故意报错的示例，或依赖别处定义的变量
-                if marker:
-                    skipped += 1
-                continue
+                failed = True
 
             if not marker:
                 continue
@@ -101,16 +127,41 @@ def check_file(path: pathlib.Path):
                 volatile += 1
                 continue
 
-            total += 1
             expected = marker.group(1).strip()
+            if any(w in expected for w in DECLARED_UNSTABLE):
+                volatile += 1
+                continue
+            head = expected.split()[0] if expected else ""
             actual = buf.getvalue().strip()
 
-            # 标注里常带中文说明（如 "3 不是 4"），只要开头对上就算通过
-            head = expected.split()[0] if expected else ""
-            if actual == expected or (head and actual.startswith(head)):
-                ok += 1
+            # 逐行模式拿到了输出 → 先严格比对
+            if not failed and actual:
+                total += 1
+                if actual == expected or (head and actual.startswith(head)):
+                    ok += 1
+                # 逐行结果不符时，用整块输出兜底：
+                # 多行结构（for / if 的循环体）逐行执行时不会被执行，
+                # 导致逐行拿到的是"半成品"输出（如空列表），整块输出才是真实语义
+                elif whole_output is not None and head and (
+                    head in whole_output or expected in whole_output
+                ):
+                    ok += 1
+                else:
+                    problems.append((block_no, code.strip(), expected, actual))
+                continue
+
+            # 逐行拿不到输出（多行结构的一部分，或依赖上文）→ 用整块输出宽松核对
+            if whole_output is not None and head:
+                total += 1
+                if head in whole_output or expected in whole_output:
+                    ok += 1
+                else:
+                    problems.append(
+                        (block_no, code.strip(), expected,
+                         f"整块输出里找不到（整块输出为 {whole_output.strip()[:80]!r}）")
+                    )
             else:
-                problems.append((block_no, code.strip(), expected, actual))
+                skipped += 1
 
     return total, ok, skipped, volatile, problems
 
